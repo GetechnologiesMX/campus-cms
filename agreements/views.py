@@ -9,6 +9,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 
 from core.permissions import IsContador
+from sales.models import Order
 
 from . import services
 from .models import Convenio
@@ -58,11 +59,12 @@ class ConvenioViewSet(viewsets.ModelViewSet):
     GET    /agreements/{id}/codes/?status=   its codes (who redeemed each, and when)
     POST   /agreements/{id}/generate/        {"count"} → new codes, up to the seats
     POST   /agreements/{id}/void/            {"ids": [...]} → voids those codes
+    POST   /agreements/{id}/revoke/          {"ids": [...]} → removes the course from whoever redeemed them
     GET    /agreements/{id}/export/          CSV of its codes
     DELETE only while it has no codes (deactivate it otherwise).
 
     Voiding a used code, deactivating or expiring the agreement never removes
-    anyone's access: it only stops new redeems.
+    anyone's access: it only stops new redeems. Only revoke/ does.
     """
 
     serializer_class = ConvenioSerializer
@@ -83,7 +85,7 @@ class ConvenioViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def codes(self, request, pk=None):
-        codes = self.get_object().codes.select_related("redeemed_by", "product")
+        codes = self.get_object().codes.select_related("redeemed_by", "product", "order", "revoked_by")
         if request.query_params.get("status"):
             codes = codes.filter(status=request.query_params["status"])
         return Response(CodigoConvenioSerializer(codes, many=True).data)
@@ -109,6 +111,17 @@ class ConvenioViewSet(viewsets.ModelViewSet):
             raise ValidationError({"ids": "Elige los códigos a anular."})
         voided = services.void_codes(convenio.codes.filter(pk__in=ids))
         return Response({"voided": voided})
+
+    @action(detail=True, methods=["post"])
+    def revoke(self, request, pk=None):
+        convenio = self.get_object()
+        ids = request.data.get("ids")
+        if not isinstance(ids, list) or not ids:
+            raise ValidationError({"ids": "Elige a quién quitarle el acceso."})
+        orders = services.revoke_access(convenio.codes.filter(pk__in=ids), by=request.user)
+        # "pending": Open edX didn't answer; reconcile_orders retries them.
+        pending = sum(order.access == Order.Access.ERROR for order in orders)
+        return Response({"revoked": len(orders), "pending": pending})
 
     @action(detail=True, methods=["get"])
     def export(self, request, pk=None):

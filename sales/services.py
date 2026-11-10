@@ -129,7 +129,7 @@ def _set_enrollment(order, is_active):
 def sync_access(order):
     """
     Make the Open edX enrollment match the order: access while paid, none after
-    a refund. Never raises: failures are recorded on the order for reconcile_orders.
+    a refund or a cancellation. Never raises: failures are recorded on the order for reconcile_orders.
     """
     want = order.status == Order.Status.PAID
     target = Order.Access.GRANTED if want else Order.Access.REVOKED

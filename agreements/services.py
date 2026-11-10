@@ -6,6 +6,10 @@ access after a Stripe payment, and records the enrollment as an Order with
 origin "agreement" and amount 0. Consuming the code, creating the order and
 the enrollment happen in one DB transaction: if Open edX doesn't enroll the
 user, everything is rolled back and the code is still available.
+
+Removing the access (revoke_access) is the only thing that takes the course
+away: voiding a code, deactivating or expiring the agreement only stop new
+redeems.
 """
 import csv
 import io
@@ -98,21 +102,56 @@ def void_codes(codes):
     course: voiding (like deactivating or expiring the agreement) only stops
     new redeems. Returns how many changed.
     """
-    return codes.exclude(status=CodigoConvenio.Status.VOID).update(status=CodigoConvenio.Status.VOID)
+    return codes.filter(status__in=[CodigoConvenio.Status.AVAILABLE, CodigoConvenio.Status.USED]).update(
+        status=CodigoConvenio.Status.VOID,
+    )
+
+
+def revoke_access(codes, by=None):
+    """
+    Take the course away from whoever redeemed these codes. Each code becomes
+    "revoked" (it no longer holds a seat, so a new code can be generated in
+    its place) and its order "cancelled"; then Open edX unenrolls the user.
+    Codes nobody redeemed, or already revoked, are skipped.
+
+    Returns the cancelled orders. One whose access is "error" (Open edX
+    didn't answer) is retried by reconcile_orders or "Reintentar" in Ventas;
+    the user keeps no access in Campus meanwhile.
+    """
+    now = timezone.now()
+    with transaction.atomic():
+        targets = list(
+            codes.select_for_update().filter(redeemed_at__isnull=False, order__status=Order.Status.PAID)
+            .exclude(status=CodigoConvenio.Status.REVOKED).select_related("order__user")
+        )
+        CodigoConvenio.objects.filter(pk__in=[code.pk for code in targets]).update(
+            status=CodigoConvenio.Status.REVOKED, revoked_at=now, revoked_by=by,
+        )
+        orders = [code.order for code in targets]
+        for order in orders:
+            order.status = Order.Status.CANCELLED
+            order.save(update_fields=["status", "modified"])
+    # Open edX after the commit: no rows stay locked while it answers.
+    for code, order in zip(targets, orders, strict=True):
+        sales_services.sync_access(order)
+        log.info("Agreement code %s: access removed from %s in %s by %s (%s)", code.code, order.user.username,
+                 order.course_key, getattr(by, "username", None), order.access)
+    return orders
 
 
 def report(convenio):
     """Seats and code counts for the agreement's report."""
     counts = convenio.codes.aggregate(
         generated=Count("pk"),
-        used=Count("pk", filter=Q(redeemed_at__isnull=False)),
+        used=Count("pk", filter=Q(redeemed_at__isnull=False) & ~Q(status=CodigoConvenio.Status.REVOKED)),
         available=Count("pk", filter=Q(status=CodigoConvenio.Status.AVAILABLE)),
         void=Count("pk", filter=Q(status=CodigoConvenio.Status.VOID)),
+        revoked=Count("pk", filter=Q(status=CodigoConvenio.Status.REVOKED)),
     )
     return {"seats": convenio.seats, **counts, "free_seats": max(convenio.seats - convenio.seats_taken(), 0)}
 
 
-CSV_HEADER = ["código", "estado", "usuario", "correo", "fecha de canje", "curso"]
+CSV_HEADER = ["código", "estado", "usuario", "correo", "fecha de canje", "curso", "acceso retirado el"]
 
 
 def codes_csv(convenios):
@@ -131,6 +170,7 @@ def codes_csv(convenios):
             code.redeemed_by.email if code.redeemed_by else "",
             timezone.localtime(code.redeemed_at).strftime("%Y-%m-%d %H:%M") if code.redeemed_at else "",
             code.product.course_key if code.product else "",
+            timezone.localtime(code.revoked_at).strftime("%Y-%m-%d %H:%M") if code.revoked_at else "",
         ])
     return out.getvalue()
 

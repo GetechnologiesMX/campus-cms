@@ -17,6 +17,7 @@ from agreements.views import client_ip
 from catalog.models import Product
 from catalog.tests.fake_openedx import FakeOpenEdx
 from core.tests.utils import auth_header, use_test_jwt_keys
+from sales.management.commands.reconcile_orders import Command as ReconcileOrders
 from sales.models import Order
 
 KEY = "course-v1:Campus+CONT101+2026_T1"
@@ -265,7 +266,7 @@ class AdminTests(AgreementSetup, TestCase):
             status=CodigoConvenio.Status.USED, redeemed_by=user, product=self.product, redeemed_at=timezone.now())
         response = self.client.get(reverse("admin:agreements_convenio_export", args=[self.convenio.pk]))
         lines = response.content.decode("utf-8-sig").splitlines()
-        assert lines[0] == "código,estado,usuario,correo,fecha de canje,curso"
+        assert lines[0] == "código,estado,usuario,correo,fecha de canje,curso,acceso retirado el"
         assert lines[1].startswith("ACME-7K3P-Q9XD,Usado,beto,,")
 
     def test_void_action_and_report(self):
@@ -277,6 +278,17 @@ class AdminTests(AgreementSetup, TestCase):
         assert self.code.status == CodigoConvenio.Status.VOID
         page = self.client.get(reverse("admin:agreements_convenio_change", args=[self.convenio.pk])).content.decode()
         assert "Lugares comprados: <b>5</b>" in page and "anulados: 1" in page
+
+    def test_revoke_access_action(self):
+        student = User.objects.create(username="alumna")
+        services.redeem(student, self.code.code, KEY)
+        response = self.client.post(reverse("admin:agreements_codigoconvenio_changelist"), {
+            "action": "revoke_access", "_selected_action": [self.code.pk],
+        })
+        assert response.status_code == 302
+        self.code.refresh_from_db()
+        assert (self.code.status, self.code.revoked_by) == (CodigoConvenio.Status.REVOKED, self.admin)
+        assert self.fake.enrollment("alumna", KEY) == {"mode": "verified", "is_active": False}
 
     def test_only_existing_courses_can_be_included(self):
         draft = Product.objects.create(title="Borrador", number="X1", run="R")
@@ -316,7 +328,7 @@ class ContadorApiTests(AgreementSetup, TestCase):
         created = response.json()
         assert created["code_prefix"] == "BETA"
         assert created["report"] == {"seats": 3, "generated": 0, "used": 0, "available": 0, "void": 0,
-                                     "free_seats": 3}
+                                     "revoked": 0, "free_seats": 3}
         assert created["products_detail"][0]["course_key"] == KEY
         assert len(self.api("get", "agreement-list").json()) == 2
 
@@ -345,6 +357,60 @@ class ContadorApiTests(AgreementSetup, TestCase):
         csv_text = self.client.get(reverse("agreement-export", args=[self.convenio.pk]), **self.auth)
         assert csv_text["Content-Type"].startswith("text/csv")
         assert len(csv_text.content.decode("utf-8-sig").splitlines()) == 6
+
+    def revoke(self, *codes):
+        return self.api("post", "agreement-revoke", self.convenio.pk, data={"ids": [c.pk for c in codes]})
+
+    def test_revoke_access_unenrolls_and_frees_the_seat(self):
+        student = User.objects.create(username="alumna", email="alumna@example.com")
+        order = services.redeem(student, self.code.code, KEY)
+        unused = CodigoConvenio.objects.create(convenio=self.convenio, code="ACME-2222-3333")
+
+        response = self.revoke(self.code, unused)
+
+        assert response.status_code == 200, response.content
+        assert response.json() == {"revoked": 1, "pending": 0}  # the unused code is skipped
+        assert self.fake.enrollment("alumna", KEY) == {"mode": "verified", "is_active": False}
+        order.refresh_from_db()
+        assert (order.status, order.access) == (Order.Status.CANCELLED, Order.Access.REVOKED)
+        self.code.refresh_from_db()
+        assert self.code.status == CodigoConvenio.Status.REVOKED
+        assert self.code.revoked_at is not None and self.code.revoked_by.username == "contadora"
+        assert self.code.redeemed_by == student  # the history stays
+        unused.refresh_from_db()
+        assert unused.status == CodigoConvenio.Status.AVAILABLE
+
+        report = self.api("get", "agreement-detail", self.convenio.pk).json()["report"]
+        assert (report["used"], report["revoked"], report["free_seats"]) == (0, 1, 4)
+        codes = {c["code"]: c for c in self.api("get", "agreement-codes", self.convenio.pk).json()}
+        assert codes[self.code.code]["access"] == "revoked"
+        assert codes[self.code.code]["revoked_by"] == "contadora"
+        # Doing it again changes nothing.
+        assert self.revoke(self.code).json() == {"revoked": 0, "pending": 0}
+
+    def test_after_revoking_the_student_can_redeem_a_new_code(self):
+        student = User.objects.create(username="alumna")
+        services.redeem(student, self.code.code, KEY)
+        self.revoke(self.code)
+        new = CodigoConvenio.objects.create(convenio=self.convenio, code="ACME-2222-3333")
+        order = services.redeem(student, new.code, KEY)
+        assert (order.status, order.access) == (Order.Status.PAID, Order.Access.GRANTED)
+        assert self.fake.enrollment("alumna", KEY) == {"mode": "verified", "is_active": True}
+
+    def test_revoke_with_open_edx_down_is_retried(self):
+        student = User.objects.create(username="alumna")
+        order = services.redeem(student, self.code.code, KEY)
+        self.fake.fail.add("unenroll")
+
+        assert self.revoke(self.code).json() == {"revoked": 1, "pending": 1}
+        order.refresh_from_db()
+        assert (order.status, order.access) == (Order.Status.CANCELLED, Order.Access.ERROR)
+
+        self.fake.fail.clear()
+        ReconcileOrders(stdout=mock.Mock(), stderr=mock.Mock()).retry_access()  # what reconcile_orders retries
+        order.refresh_from_db()
+        assert order.access == Order.Access.REVOKED
+        assert self.fake.enrollment("alumna", KEY)["is_active"] is False
 
     def test_seats_cant_drop_below_codes_and_delete_needs_no_codes(self):
         response = self.api("patch", "agreement-detail", self.convenio.pk, data={"seats": 0})

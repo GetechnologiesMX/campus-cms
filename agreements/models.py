@@ -49,7 +49,8 @@ class Convenio(models.Model):
     )
     seats = models.PositiveIntegerField(
         "lugares", validators=[MinValueValidator(1)],
-        help_text="Lugares comprados. Los códigos anulados sin usar no cuentan, así que se pueden reponer.",
+        help_text="Lugares comprados. Los códigos anulados sin usar y aquellos a los que se les quitó el acceso no "
+                  "cuentan, así que se pueden reponer.",
     )
     code_prefix = models.CharField(
         "prefijo de los códigos", max_length=6, validators=[prefix_validator],
@@ -57,11 +58,13 @@ class Convenio(models.Model):
     )
     expires_at = models.DateField(
         "vence el",
-        help_text="Último día en que se pueden canjear códigos. Que venza no quita el acceso a quien ya canjeó.",
+        help_text="Último día en que se pueden canjear códigos. Que venza no quita el acceso a quien ya canjeó "
+                  "(para eso, usa «Quitar acceso» en sus códigos).",
     )
     active = models.BooleanField(
         "activo", default=True,
-        help_text="Desactivarlo impide nuevos canjes, pero no quita el acceso a quien ya canjeó un código.",
+        help_text="Desactivarlo impide nuevos canjes, pero no quita el acceso a quien ya canjeó un código (para eso, "
+                  "usa «Quitar acceso» en sus códigos).",
     )
     notes = models.TextField("notas", blank=True)
     created = models.DateTimeField("creado", auto_now_add=True)
@@ -82,10 +85,11 @@ class Convenio(models.Model):
     def seats_taken(self):
         """
         Codes that count against the seats: every one except those voided
-        before anyone used them (a voided *used* code still holds a seat:
-        whoever redeemed it keeps the access).
+        before anyone used them and those whose access was removed (a voided
+        *used* code still holds a seat: whoever redeemed it keeps the access).
         """
-        return self.codes.exclude(status=CodigoConvenio.Status.VOID, redeemed_at__isnull=True).count()
+        return (self.codes.exclude(status=CodigoConvenio.Status.VOID, redeemed_at__isnull=True)
+                .exclude(status=CodigoConvenio.Status.REVOKED).count())
 
 
 class CodigoConvenio(models.Model):
@@ -93,12 +97,15 @@ class CodigoConvenio(models.Model):
         AVAILABLE = "available", "Disponible"
         USED = "used", "Usado"
         VOID = "void", "Anulado"
+        # Someone redeemed it and a contador removed their access later. It
+        # no longer holds a seat: a new code can be generated in its place.
+        REVOKED = "revoked", "Acceso retirado"
 
     code = models.CharField("código", max_length=32, unique=True)
     convenio = models.ForeignKey(Convenio, on_delete=models.PROTECT, related_name="codes")
     status = models.CharField(
         "estado", max_length=16, choices=Status.choices, default=Status.AVAILABLE, db_index=True,
-        help_text="Anular un código ya usado no quita el acceso a quien lo canjeó.",
+        help_text="Anular un código ya usado no quita el acceso a quien lo canjeó; «Quitar acceso» sí.",
     )
     redeemed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
                                     related_name="+", verbose_name="canjeado por")
@@ -108,6 +115,9 @@ class CodigoConvenio(models.Model):
     # The amount-0 order that records the enrollment (Order.origin = agreement).
     order = models.OneToOneField("sales.Order", on_delete=models.PROTECT, null=True, blank=True,
                                  related_name="agreement_code", verbose_name="orden")
+    revoked_at = models.DateTimeField("acceso retirado el", null=True, blank=True)
+    revoked_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+                                   related_name="+", verbose_name="acceso retirado por")
     created = models.DateTimeField("creado", auto_now_add=True)
 
     class Meta:

@@ -10,11 +10,14 @@ from django.urls import path, reverse
 from django.utils.html import format_html
 from django.utils.text import slugify
 
+from sales.models import Order
+
 from . import services
 from .models import REDEEMABLE_STATUSES, CodigoConvenio, Convenio, RedeemAttempt
 
 NO_REVOKE_NOTE = ("Anular un código ya usado, desactivar el convenio o dejar que venza no quita el acceso a quien "
-                  "ya canjeó un código: solo impide canjes nuevos.")
+                  "ya canjeó un código: solo impide canjes nuevos. Para quitarle el curso a alguien, usa la acción "
+                  "«Quitar acceso» en sus códigos.")
 
 
 class ConvenioForm(forms.ModelForm):
@@ -43,7 +46,7 @@ class RedeemedCodesInline(admin.TabularInline):
     model = CodigoConvenio
     verbose_name = "código canjeado"
     verbose_name_plural = "quién canjeó los códigos"
-    fields = ("code", "redeemed_by", "user_email", "product", "redeemed_at", "status")
+    fields = ("code", "redeemed_by", "user_email", "product", "redeemed_at", "status", "revoked_at")
     readonly_fields = fields
     extra = 0
     can_delete = False
@@ -91,7 +94,8 @@ class ConvenioAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return super().get_queryset(request).annotate(
             n_generated=Count("codes"),
-            n_used=Count("codes", filter=Q(codes__redeemed_at__isnull=False)),
+            n_used=Count("codes", filter=Q(codes__redeemed_at__isnull=False)
+                         & ~Q(codes__status=CodigoConvenio.Status.REVOKED)),
             n_available=Count("codes", filter=Q(codes__status=CodigoConvenio.Status.AVAILABLE)),
         )
 
@@ -114,10 +118,11 @@ class ConvenioAdmin(admin.ModelAdmin):
         codes = services.report(convenio)
         return format_html(
             "Lugares comprados: <b>{}</b> · generados: <b>{}</b> · usados: <b>{}</b> · disponibles: <b>{}</b> · "
-            "anulados: {} · lugares sin código: {}<br>"
+            "anulados: {} · acceso retirado: {} · lugares sin código: {}<br>"
             '<a class="button" href="{}">Generar códigos</a> <a class="button" href="{}">Exportar CSV</a> '
             '<a href="{}">Ver todos los códigos</a>',
-            convenio.seats, codes["generated"], codes["used"], codes["available"], codes["void"], codes["free_seats"],
+            convenio.seats, codes["generated"], codes["used"], codes["available"], codes["void"], codes["revoked"],
+            codes["free_seats"],
             reverse("admin:agreements_convenio_generate", args=[convenio.pk]),
             reverse("admin:agreements_convenio_export", args=[convenio.pk]),
             reverse("admin:agreements_codigoconvenio_changelist") + f"?convenio__id__exact={convenio.pk}",
@@ -175,12 +180,13 @@ class ConvenioAdmin(admin.ModelAdmin):
 
 @admin.register(CodigoConvenio)
 class CodigoConvenioAdmin(admin.ModelAdmin):
-    list_display = ("code", "convenio", "status", "redeemed_by", "product", "redeemed_at")
+    list_display = ("code", "convenio", "status", "redeemed_by", "product", "redeemed_at", "revoked_at")
     list_filter = ("status", "convenio")
     search_fields = ("code", "redeemed_by__username", "redeemed_by__email", "convenio__company")
     list_select_related = ("convenio", "redeemed_by", "product")
-    readonly_fields = ("code", "convenio", "status", "redeemed_by", "product", "redeemed_at", "order", "created")
-    actions = ["void_codes"]
+    readonly_fields = ("code", "convenio", "status", "redeemed_by", "product", "redeemed_at", "order", "revoked_at",
+                       "revoked_by", "created")
+    actions = ["void_codes", "revoke_access"]
 
     def has_add_permission(self, request):
         return False  # generated from the agreement, never typed by hand
@@ -192,6 +198,16 @@ class CodigoConvenioAdmin(admin.ModelAdmin):
     def void_codes(self, request, queryset):
         voided = services.void_codes(queryset)
         self.message_user(request, f"{voided} códigos anulados. {NO_REVOKE_NOTE}", messages.SUCCESS)
+
+    @admin.action(description="Quitar acceso al curso a quien canjeó el código")
+    def revoke_access(self, request, queryset):
+        orders = services.revoke_access(queryset, by=request.user)
+        pending = sum(order.access == Order.Access.ERROR for order in orders)
+        self.message_user(request, f"Se quitó el acceso a {len(orders)} alumnos; sus lugares quedan libres.",
+                          messages.SUCCESS)
+        if pending:
+            self.message_user(request, f"Open edX no respondió para {pending}: se reintentará con reconcile_orders "
+                              "o con «Reintentar» en Ventas.", messages.WARNING)
 
 
 @admin.register(RedeemAttempt)

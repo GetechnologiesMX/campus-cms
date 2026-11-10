@@ -19,7 +19,7 @@ from sales.models import Order
 
 class Command(BaseCommand):
     help = (
-        "Retries access for paid/refunded orders that Open edX didn't get, settles pending orders "
+        "Retries access for paid/refunded/cancelled orders that Open edX didn't get, settles pending orders "
         "whose webhook never arrived, and reports paid enrollments with no paid order."
     )
 
@@ -35,7 +35,8 @@ class Command(BaseCommand):
     def retry_access(self):
         orders = Order.objects.select_related("user").filter(
             Q(status=Order.Status.PAID) & ~Q(access=Order.Access.GRANTED)
-            | Q(status=Order.Status.REFUNDED, access__in=[Order.Access.GRANTED, Order.Access.ERROR])
+            | Q(status__in=[Order.Status.REFUNDED, Order.Status.CANCELLED],
+                access__in=[Order.Access.GRANTED, Order.Access.ERROR])
         )
         fixed = failed = 0
         for order in orders:

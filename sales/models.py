@@ -20,6 +20,9 @@ class Order(models.Model):
         PAID = "paid", "Pagada"
         FAILED = "failed", "Fallida"
         REFUNDED = "refunded", "Reembolsada"
+        # An agreement order whose access a contador removed (agreements app):
+        # no money involved, so it isn't a refund.
+        CANCELLED = "cancelled", "Cancelada"
 
     class Access(models.TextChoices):
         NONE = "none", "Sin acceso"

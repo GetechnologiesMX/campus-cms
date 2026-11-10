@@ -152,10 +152,16 @@ superusers) under **Convenios**:
 - **Generar códigos** (button on the agreement, or the list action) creates
   codes like `ACME-7K3P-Q9XD` (no 0/O, 1/I/L; `secrets`), never more than the
   seats. Voided codes nobody used don't count, so they can be replaced.
-- **Exportar CSV**: code, status, user, redeem date, course.
+- **Exportar CSV**: code, status, user, redeem date, course, access removed date.
 - **Anular códigos** (codes list). Voiding a used code, deactivating the
   agreement or letting it expire **doesn't remove anyone's access**: it only
   stops new redeems.
+- **Quitar acceso** ("Quién los usó" in Campus, `POST /api/v1/agreements/{id}/revoke/`
+  `{"ids"}`, or the Django admin action) is what takes the course away: the
+  code becomes `revoked` (who and when are kept, and its seat is free again),
+  its order `cancelled`, and Open edX unenrolls the user. If Open edX doesn't
+  answer, the order stays with access `error` and `reconcile_orders` (or
+  "Reintentar" in Ventas) finishes it. The user can redeem a new code later.
 - The agreement page shows seats / generated / used / available and who
   redeemed each code, and when.
 

@@ -61,8 +61,12 @@ class CodigoConvenioSerializer(serializers.ModelSerializer):
     email = serializers.CharField(source="redeemed_by.email", default=None, read_only=True)
     course_key = serializers.CharField(source="product.course_key", default=None, read_only=True)
     course_title = serializers.CharField(source="product.title", default=None, read_only=True)
+    # The access in Open edX of whoever redeemed it (Order.access), null if unused.
+    access = serializers.CharField(source="order.access", default=None, read_only=True)
+    revoked_by = serializers.CharField(source="revoked_by.username", default=None, read_only=True)
 
     class Meta:
         model = CodigoConvenio
-        fields = ("id", "code", "status", "username", "email", "course_key", "course_title", "redeemed_at", "created")
+        fields = ("id", "code", "status", "username", "email", "course_key", "course_title", "redeemed_at", "access",
+                  "revoked_at", "revoked_by", "created")
         read_only_fields = fields
