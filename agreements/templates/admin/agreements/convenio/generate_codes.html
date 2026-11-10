@@ -1,0 +1,28 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Inicio</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; <a href="{% url 'admin:agreements_convenio_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+  &rsaquo; <a href="{% url 'admin:agreements_convenio_change' convenio.pk %}">{{ convenio }}</a>
+  &rsaquo; Generar códigos
+</div>
+{% endblock %}
+
+{% block content %}
+<p>
+  Lugares comprados: <b>{{ convenio.seats }}</b>. Lugares sin código: <b>{{ free }}</b>
+  (los códigos anulados sin usar no cuentan).
+</p>
+{% if free %}
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <p>Formato: <code>{{ convenio.code_prefix }}-XXXX-XXXX</code>, sin 0, 1, O, I ni L.</p>
+  <input type="submit" class="default" value="Generar">
+</form>
+{% else %}
+<p>Ya se generaron códigos para todos los lugares. Anula alguno sin usar o aumenta los lugares para generar más.</p>
+{% endif %}
+{% endblock %}

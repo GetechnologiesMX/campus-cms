@@ -65,6 +65,11 @@ class FakeOpenEdx:
                 raise OpenEdxError("The [verified] course mode is expired or otherwise unavailable", 400)
             self.enrollments[(data["user"], key)] = {"mode": data["mode"], "is_active": data["is_active"]}
             return dict(self.enrollments[(data["user"], key)])
+        if method == "GET" and path.startswith("/api/enrollment/v1/enrollment/"):
+            self._check("read-enrollment")
+            username, key = path.rsplit("/", 1)[1].split(",", 1)
+            enrollment = self.enrollments.get((username, key))
+            return dict(enrollment) if enrollment else None
         if path.startswith("/api/course_modes/v1/courses/"):
             key = path.split("/")[5]
             modes = self.modes.setdefault(key, {})

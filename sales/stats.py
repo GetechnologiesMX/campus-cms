@@ -7,6 +7,10 @@ Definitions (all in MXN, by local day in settings.TIME_ZONE):
 - refunds: money that went back during the period (orders by ``refunded_at``);
 - net: gross - refunds.
 
+Only sales count: enrollments with a company agreement code (origin
+"agreement", amount 0) are billed outside the platform and would only add
+orders worth nothing and lower the average.
+
 Days are bucketed in Python rather than with SQL date functions: those need
 MySQL's time zone tables, which a stock install doesn't load. Volumes are
 small (one row per sale), so this stays cheap.
@@ -50,9 +54,13 @@ def _bucket(moment, weekly):
     return day - timedelta(days=day.weekday()) if weekly else day
 
 
+def _sales():
+    return Order.objects.filter(origin=Order.Origin.STRIPE)
+
+
 def _totals(since, until):
-    paid = list(Order.objects.filter(paid_at__gte=since, paid_at__lt=until).values_list("amount", "user_id"))
-    refunds = list(Order.objects.filter(refunded_at__gte=since, refunded_at__lt=until).values_list("amount", flat=True))
+    paid = list(_sales().filter(paid_at__gte=since, paid_at__lt=until).values_list("amount", "user_id"))
+    refunds = list(_sales().filter(refunded_at__gte=since, refunded_at__lt=until).values_list("amount", flat=True))
     gross = sum((amount for amount, _ in paid), ZERO)
     refunded = sum(refunds, ZERO)
     return {
@@ -82,7 +90,7 @@ def dashboard(start, end):
         series[bucket] = {"gross": ZERO, "refunds": ZERO, "paid_orders": 0}
         bucket += step
     by_product = defaultdict(lambda: {"sold": 0, "gross": ZERO, "refunds": ZERO, "refunded": 0})
-    for paid_at, amount, product_id in Order.objects.filter(paid_at__gte=since, paid_at__lt=until).values_list(
+    for paid_at, amount, product_id in _sales().filter(paid_at__gte=since, paid_at__lt=until).values_list(
         "paid_at", "amount", "product_id"
     ):
         point = series[_bucket(paid_at, weekly)]
@@ -90,7 +98,7 @@ def dashboard(start, end):
         point["paid_orders"] += 1
         by_product[product_id]["sold"] += 1
         by_product[product_id]["gross"] += amount
-    for refunded_at, amount, product_id in Order.objects.filter(
+    for refunded_at, amount, product_id in _sales().filter(
         refunded_at__gte=since, refunded_at__lt=until
     ).values_list("refunded_at", "amount", "product_id"):
         series[_bucket(refunded_at, weekly)]["refunds"] += amount

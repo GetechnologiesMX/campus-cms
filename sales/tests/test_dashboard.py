@@ -85,6 +85,13 @@ class DashboardTests(TestCase):
         assert weeks["2026-10-12"] == "1000.00"  # the Monday of that week
         assert all(datetime.fromisoformat(d).weekday() == 0 for d in weeks)
 
+    def test_agreement_enrollments_are_not_sales(self):
+        self.sale(self.a, self.users[0], at(5))
+        self.sale(self.a, self.users[1], at(5), amount="0.00", origin=Order.Origin.AGREEMENT)
+        data = self.get(**{"from": "2026-10-01", "to": "2026-10-31"}).json()
+        assert (data["totals"]["paid_orders"], data["totals"]["average_order"]) == (1, "1000.00")
+        assert next(c for c in data["courses"] if c["title"] == "Contabilidad")["sold"] == 1
+
     def test_access_errors_need_attention(self):
         self.sale(self.a, self.users[0], at(5), access=Order.Access.ERROR, access_error="LMS down")
         assert self.get().json()["attention"]["access_errors"] == 1

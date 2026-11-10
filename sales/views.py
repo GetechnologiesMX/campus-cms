@@ -139,8 +139,8 @@ class AdminOrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Order
-        fields = ("id", "username", "email", "course_key", "course_title", "amount", "currency", "status", "access",
-                  "access_error", "created", "paid_at", "refunded_at")
+        fields = ("id", "username", "email", "course_key", "course_title", "amount", "currency", "origin", "status",
+                  "access", "access_error", "created", "paid_at", "refunded_at")
 
 
 class OrderPagination(PageNumberPagination):

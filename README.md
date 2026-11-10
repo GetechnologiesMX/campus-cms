@@ -60,6 +60,7 @@ make tutor ARGS="dev exec campus-cms python manage.py contador <username> --remo
 | GET | `/api/v1/catalog/{course_key}/` | anyone | One of them; archived courses are found too (`on_sale: false`), drafts and created ones aren't |
 | POST | `/api/v1/checkout/` | logged in | `{"course_id"}` → `{"order_id", "checkout_url"}`; errors `{"code": "course_not_found" \| "not_purchasable" \| "already_owned" \| "payment_unavailable"}` |
 | GET | `/api/v1/me/orders/` | logged in | The user's orders |
+| POST | `/api/v1/agreements/redeem/` | logged in | `{"code", "course_id"}` → `{"order_id", "course_id"}`; errors `{"code": "invalid_code" \| "expired" \| "course_not_included" \| "already_enrolled" \| "too_many_attempts" \| "unavailable" \| "enrollment_failed"}` |
 | POST | `/api/v1/webhooks/stripe/` | Stripe signature | Stripe events |
 | GET | `/api/v1/stats/?from=&to=` | contador | Dashboard figures for a period (dates `YYYY-MM-DD`, default last 30 days, up to a year) |
 | GET | `/api/v1/orders/` | contador | Every order, 50 per page; `?status=`, `?access=`, `?course_key=`, `?q=` (username or email) |
@@ -138,6 +139,41 @@ make tutor ARGS="dev exec campus-cms python manage.py reconcile_orders"
 ```
 
 Stripe test webhooks reach the local CMS with `make stripe` (from `plataforma-equipo`).
+
+## Company agreements (convenios)
+
+A company buys N seats outside the platform (invoice or payment link) and its
+employees redeem single-use codes, managed in the Django admin (`/admin/`,
+superusers) under **Convenios**:
+
+- A **Convenio** has the company, contact, included courses (created in Open
+  edX or on sale: a course not sold to the public works too), seats, code
+  prefix, last day to redeem and an active flag.
+- **Generar códigos** (button on the agreement, or the list action) creates
+  codes like `ACME-7K3P-Q9XD` (no 0/O, 1/I/L; `secrets`), never more than the
+  seats. Voided codes nobody used don't count, so they can be replaced.
+- **Exportar CSV**: code, status, user, redeem date, course.
+- **Anular códigos** (codes list). Voiding a used code, deactivating the
+  agreement or letting it expire **doesn't remove anyone's access**: it only
+  stops new redeems.
+- The agreement page shows seats / generated / used / available and who
+  redeemed each code, and when.
+
+Redeeming (`POST /api/v1/agreements/redeem/`, from Campus' `/cursos/{id}`
+"¿Tienes un código de tu empresa?" or the shareable `/canjear/{id}` page):
+the code is normalized (`acme 7k3p q9xd` works), checked (available, agreement
+active and not past its day, course included and created/on sale) and, unless
+the user already has the course, taken with a conditional `UPDATE` in the
+same transaction that creates the order (`origin = agreement`, amount 0) and
+enrolls the user with the same `sync_access` Stripe payments use. If Open edX
+doesn't enroll them, everything rolls back and the code stays available.
+Open edX calls in that transaction time out after 8 s.
+
+Unknown, used and voided codes get the same answer. Failed attempts are
+limited to 10 per user and 30 per IP every 15 minutes; they're deleted after
+24 h (as new ones come in, and with
+`make tutor ARGS="dev exec campus-cms python manage.py purge_redeem_attempts"`).
+Agreement orders don't count in the dashboard money figures.
 
 ## Dashboard figures
 

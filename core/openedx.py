@@ -4,6 +4,8 @@ Client for the Open edX APIs, authenticated as the CMS service account.
 The LMS issues a JWT for the client-credentials application; the token
 carries the service user (staff), which Studio's course run API requires.
 """
+from contextlib import contextmanager
+from contextvars import ContextVar
 from urllib.parse import quote
 
 import requests
@@ -15,6 +17,26 @@ TIMEOUT = 15
 # Studio writes that touch course settings (dates, team) republish and
 # reindex the course before answering, which takes well over 15 s in dev.
 WRITE_TIMEOUT = 90
+# Set by timeout_cap(): the most any call may wait, whatever its default.
+_timeout_cap = ContextVar("openedx_timeout_cap", default=None)
+
+
+@contextmanager
+def timeout_cap(seconds):
+    """
+    Limit how long each call made inside the block may wait. For code that
+    calls Open edX while holding a DB lock (e.g. redeeming an agreement code).
+    """
+    token = _timeout_cap.set(seconds)
+    try:
+        yield
+    finally:
+        _timeout_cap.reset(token)
+
+
+def _timeout(default):
+    cap = _timeout_cap.get()
+    return default if cap is None else min(default, cap)
 
 
 class OpenEdxError(Exception):
@@ -35,7 +57,7 @@ def _access_token():
             "client_secret": settings.OPENEDX_OAUTH2_CLIENT_SECRET,
             "token_type": "jwt",
         },
-        timeout=TIMEOUT,
+        timeout=_timeout(TIMEOUT),
     )
     if response.status_code != 200:
         raise OpenEdxError(f"Could not get a token from the LMS ({response.status_code}): {response.text[:200]}")
@@ -48,7 +70,7 @@ def _access_token():
 
 def request(method, url, **kwargs):
     headers = {"Authorization": f"JWT {_access_token()}", **kwargs.pop("headers", {})}
-    timeout = TIMEOUT if method == "GET" else WRITE_TIMEOUT
+    timeout = _timeout(TIMEOUT if method == "GET" else WRITE_TIMEOUT)
     try:
         response = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
     except requests.RequestException as exc:

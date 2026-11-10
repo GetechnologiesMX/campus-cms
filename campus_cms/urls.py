@@ -11,6 +11,7 @@ urlpatterns = [
     path("api/v1/me/", me, name="me"),
     path("api/v1/", include("catalog.urls")),
     path("api/v1/", include("sales.urls")),
+    path("api/v1/", include("agreements.urls")),
 ]
 
 # Uploaded course images, a few hundred KB each: Django serves them in every

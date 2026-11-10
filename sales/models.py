@@ -27,12 +27,19 @@ class Order(models.Model):
         REVOKED = "revoked", "Acceso retirado"
         ERROR = "error", "Error en Open edX"
 
+    class Origin(models.TextChoices):
+        STRIPE = "stripe", "Compra con Stripe"
+        # Redeemed with a company agreement code (agreements app): amount 0,
+        # the company is billed outside the platform.
+        AGREEMENT = "agreement", "Código de convenio"
+
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="orders")
     product = models.ForeignKey("catalog.Product", on_delete=models.PROTECT, related_name="orders")
     # Copied at purchase time, like the price, so history doesn't depend on the product.
     course_key = models.CharField(max_length=255, db_index=True)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=3, default="mxn")
+    origin = models.CharField(max_length=16, choices=Origin.choices, default=Origin.STRIPE, db_index=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True)
     access = models.CharField(max_length=16, choices=Access.choices, default=Access.NONE, db_index=True)
     access_error = models.TextField(blank=True)

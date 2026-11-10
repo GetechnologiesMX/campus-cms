@@ -21,3 +21,12 @@ class RequestTests(SimpleTestCase):
             openedx.studio("GET", "/x")
             openedx.studio("PUT", "/x")
         assert [call.kwargs["timeout"] for call in request.call_args_list] == [openedx.TIMEOUT, openedx.WRITE_TIMEOUT]
+
+    def test_timeout_cap_shortens_every_call_inside_the_block(self, _token):
+        response = mock.Mock(status_code=200, content=b"{}", json=lambda: {})
+        with mock.patch("core.openedx.requests.request", return_value=response) as request:
+            with openedx.timeout_cap(5):
+                openedx.lms("GET", "/x")
+                openedx.lms("POST", "/x")
+            openedx.lms("POST", "/x")
+        assert [call.kwargs["timeout"] for call in request.call_args_list] == [5, 5, openedx.WRITE_TIMEOUT]
