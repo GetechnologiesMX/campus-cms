@@ -28,7 +28,7 @@ class PublicCatalogTests(TestCase):
         assert response.json() == [{
             "id": "course-v1:Campus+C1+2026_T1", "title": "Curso C1", "org": "Campus", "number": "C1",
             "short_description": "Corto", "description": "Largo", "image": None,
-            "price": 1499, "currency": "mxn", "on_sale": True,
+            "price": 1499, "currency": "mxn", "on_sale": True, "offer": None,
         }]
 
     def test_detail_finds_on_sale_and_archived_courses(self):

@@ -35,12 +35,23 @@ class Order(models.Model):
         # Redeemed with a company agreement code (agreements app): amount 0,
         # the company is billed outside the platform.
         AGREEMENT = "agreement", "Código de convenio"
+        # A 100% discount code (promotions app): amount 0, no gateway involved.
+        PROMOTION = "promotion", "Código de descuento del 100%"
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="orders")
     product = models.ForeignKey("catalog.Product", on_delete=models.PROTECT, related_name="orders")
     # Copied at purchase time, like the price, so history doesn't depend on the product.
     course_key = models.CharField(max_length=255, db_index=True)
+    # What was charged: the list price minus the discount.
     amount = models.DecimalField(max_digits=10, decimal_places=2)
+    # The product's price at purchase time, the discount and the promotion
+    # behind it (promotions app). The code is copied too: history doesn't
+    # depend on the promotion being edited later.
+    list_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    promotion = models.ForeignKey("promotions.Promocion", on_delete=models.PROTECT, null=True, blank=True,
+                                  related_name="orders")
+    promotion_code = models.CharField(max_length=32, blank=True)
     currency = models.CharField(max_length=3, default="mxn")
     origin = models.CharField(max_length=16, choices=Origin.choices, default=Origin.STRIPE, db_index=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True)

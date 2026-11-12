@@ -13,9 +13,9 @@ from django.utils import timezone
 
 from agreements import services
 from agreements.models import CodigoConvenio, Convenio, RedeemAttempt, normalize_code
-from agreements.views import client_ip
 from catalog.models import Product
 from catalog.tests.fake_openedx import FakeOpenEdx
+from core.http import client_ip
 from core.tests.utils import auth_header, use_test_jwt_keys
 from sales.management.commands.reconcile_orders import Command as ReconcileOrders
 from sales.models import Order

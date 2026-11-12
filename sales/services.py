@@ -10,16 +10,18 @@ Every function that reacts to Stripe is idempotent: Stripe retries webhooks and
 can deliver the same event more than once.
 """
 import logging
+from datetime import timedelta
 from urllib.parse import quote
 
 import stripe
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from catalog import openedx_sync
 from catalog.models import Product
 from core import openedx
+from promotions import pricing
 
 from .models import Order
 
@@ -43,11 +45,11 @@ def course_page_url(course_key):
     return f"{settings.PUBLIC_SITE_URL}/cursos/{quote(course_key, safe='')}"
 
 
-def _open_checkout(user, product):
+def _open_checkout(user, product, price_quote):
     """
     Return ``(order, url)`` for the user's latest Stripe session for this product
     if it can still be paid, so two tabs/clicks don't create two payable checkouts.
-    A price change makes a new checkout.
+    A different price or promotion makes a new checkout.
 
     If that session was already paid but its webhook hasn't arrived (delayed, or
     no ``make stripe`` running locally), settle it now and report the course as owned.
@@ -63,13 +65,68 @@ def _open_checkout(user, product):
         if order is not None and order.status == Order.Status.PAID:
             raise PurchaseError("already_owned", "Ya tienes este curso.", status=409)
         return None
-    if session.status != "open" or order.amount != product.price:
+    if (session.status != "open" or order.amount != price_quote.price
+            or order.promotion_id != getattr(price_quote.promotion, "pk", None)):
         return None
     return order, session.url
 
 
-def create_checkout(user, course_key):
-    """Create a pending Order and its Stripe Checkout Session. Returns ``(order, checkout_url)``."""
+def _promo_error(exc):
+    return PurchaseError(exc.code, str(exc), status=exc.status)
+
+
+def _new_order(user, product, code, **fields):
+    """
+    Price it again with the promotions locked and create the order: the
+    unpaid order is what reserves the use (pricing.RESERVATION).
+    """
+    try:
+        price_quote = pricing.quote(product, user, code, lock=True)
+    except pricing.PromoError as exc:
+        raise _promo_error(exc) from None
+    return Order.objects.create(
+        user=user, product=product, course_key=product.course_key, amount=price_quote.price,
+        list_price=price_quote.list_price, discount=price_quote.discount, promotion=price_quote.promotion,
+        promotion_code=price_quote.code, **fields,
+    )
+
+
+# Open edX calls made while a promotion row is locked (free enrollments).
+FREE_ENROLLMENT_TIMEOUT = 8
+
+
+def _enroll_free(user, product, code):
+    """
+    A 100% discount code: no gateway. The order (amount 0, paid) and the
+    enrollment happen in one transaction; if Open edX doesn't enroll the user
+    everything rolls back and the code isn't used.
+    """
+    now = timezone.now()
+    try:
+        with transaction.atomic():
+            order = _new_order(user, product, code, origin=Order.Origin.PROMOTION, status=Order.Status.PAID,
+                               paid_at=now)
+            if order.amount != 0:
+                raise PurchaseError("price_changed", "El precio cambió; vuelve a intentarlo.", status=409)
+            with openedx.timeout_cap(FREE_ENROLLMENT_TIMEOUT):
+                sync_access(order)
+            if order.access != Order.Access.GRANTED:
+                raise PurchaseError("enrollment_failed", "No pudimos activar tu acceso en este momento. Intenta de "
+                                    "nuevo en unos minutos; tu código no se usó.", status=503)
+    except IntegrityError:
+        raise PurchaseError("already_owned", "Ya tienes este curso.", status=409) from None
+    log.info("Order %s: %s got %s free with code %s", order.pk, user.username, order.course_key,
+             order.promotion_code)
+    return order
+
+
+def create_checkout(user, course_key, code="", ip=None):
+    """
+    Create a pending Order and its Stripe Checkout Session, at the price
+    promotions.pricing gives (offer or discount ``code``). Returns
+    ``(order, checkout_url)``; ``checkout_url`` is None when a 100% code
+    enrolled the user right away.
+    """
     product = Product.objects.filter(course_key=course_key).first()
     if product is None:
         raise PurchaseError("course_not_found", "Curso no encontrado.", status=404)
@@ -77,35 +134,65 @@ def create_checkout(user, course_key):
         raise PurchaseError("not_purchasable", "Este curso no está a la venta.")
     if user_owns(user, product):
         raise PurchaseError("already_owned", "Ya tienes este curso.", status=409)
+    try:
+        price_quote = pricing.quote_with_limits(product, user, code, ip)
+    except pricing.PromoError as exc:
+        raise _promo_error(exc) from None
 
-    reusable = _open_checkout(user, product)
+    reusable = _open_checkout(user, product, price_quote)
     if reusable is not None:
         return reusable
+    if price_quote.free:
+        return _enroll_free(user, product, code), None
 
-    order = Order.objects.create(user=user, product=product, course_key=course_key, amount=product.price)
+    with transaction.atomic():
+        order = _new_order(user, product, code)
+    if order.amount != price_quote.price:
+        # The offer ended or the last use went in the meantime: don't charge
+        # a price the buyer didn't see.
+        order.status = Order.Status.FAILED
+        order.save(update_fields=["status", "modified"])
+        raise PurchaseError("price_changed", "El precio cambió; revisa el curso y vuelve a intentarlo.", status=409)
+
     page = course_page_url(course_key)
     metadata = {"order_id": str(order.pk), "course_id": course_key}
-    session = stripe.checkout.Session.create(
-        api_key=settings.STRIPE_SECRET_KEY,
-        mode="payment",
-        line_items=[{
-            "quantity": 1,
-            "price_data": {
-                "currency": order.currency,
-                # Stripe expects the smallest currency unit (centavos).
-                "unit_amount": int(order.amount * 100),
-                "product_data": {"name": product.title},
-            },
-        }],
-        customer_email=user.email or None,
-        client_reference_id=str(order.pk),
-        metadata=metadata,
-        payment_intent_data={"metadata": metadata},
-        success_url=f"{page}?payment=success",
-        cancel_url=f"{page}?payment=cancelled",
-        # Payment methods (card, OXXO...) are chosen in the Stripe Dashboard.
-        idempotency_key=f"campus-cms-order-{order.pk}",
-    )
+    if order.promotion_code:
+        metadata["promotion_code"] = order.promotion_code
+    product_data = {"name": product.title}
+    if order.discount:
+        product_data["description"] = f"Precio de lista ${order.list_price:,.2f} MXN, descuento ${order.discount:,.2f}"
+    extra = {}
+    if order.promotion_id:
+        # The use is reserved while the checkout is open: close it when the reservation ends.
+        extra["expires_at"] = int((timezone.now() + pricing.RESERVATION + timedelta(minutes=1)).timestamp())
+    try:
+        session = stripe.checkout.Session.create(
+            api_key=settings.STRIPE_SECRET_KEY,
+            mode="payment",
+            line_items=[{
+                "quantity": 1,
+                "price_data": {
+                    "currency": order.currency,
+                    # Stripe expects the smallest currency unit (centavos).
+                    "unit_amount": int(order.amount * 100),
+                    "product_data": product_data,
+                },
+            }],
+            customer_email=user.email or None,
+            client_reference_id=str(order.pk),
+            metadata=metadata,
+            payment_intent_data={"metadata": metadata},
+            success_url=f"{page}?payment=success",
+            cancel_url=f"{page}?payment=cancelled",
+            # Payment methods (card, OXXO...) are chosen in the Stripe Dashboard.
+            idempotency_key=f"campus-cms-order-{order.pk}",
+            **extra,
+        )
+    except stripe.StripeError:
+        # Free the reserved use right away.
+        order.status = Order.Status.FAILED
+        order.save(update_fields=["status", "modified"])
+        raise
     order.stripe_checkout_session_id = session.id
     order.save(update_fields=["stripe_checkout_session_id", "modified"])
     return order, session.url

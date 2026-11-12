@@ -56,14 +56,17 @@ make tutor ARGS="dev exec campus-cms python manage.py contador <username> --remo
 |---|---|---|---|
 | GET | `/api/health/` | anyone | Service and database are up |
 | GET | `/api/v1/me/` | logged in | `{username, email, is_contador, course_org}` (`course_org`: the org of the courses the CMS creates or adopts) |
-| GET | `/api/v1/catalog/` | anyone | Courses on sale, for the public site: `{id (course key), title, org, number, short_description, description, image, price, currency, on_sale}` |
+| GET | `/api/v1/catalog/` | anyone | Courses on sale, for the public site: `{id (course key), title, org, number, short_description, description, image, price, currency, on_sale, offer}` (`price` is the list price; `offer`: `{name, price, discount, ends_at}` of the running offer, or null) |
 | GET | `/api/v1/catalog/{course_key}/` | anyone | One of them; archived courses are found too (`on_sale: false`), drafts and created ones aren't |
-| POST | `/api/v1/checkout/` | logged in | `{"course_id"}` → `{"order_id", "checkout_url"}`; errors `{"code": "course_not_found" \| "not_purchasable" \| "already_owned" \| "payment_unavailable"}` |
+| POST | `/api/v1/checkout/` | logged in | `{"course_id", "code"?}` → `{"order_id", "checkout_url", "enrolled"}` (a 100% code enrolls right away: `checkout_url` null, `enrolled` true); errors `{"code": "course_not_found" \| "not_purchasable" \| "already_owned" \| "price_changed" \| "enrollment_failed" \| "payment_unavailable"` or a discount code error} |
+| POST | `/api/v1/promotions/quote/` | anyone (logged in: also the per-person limit) | `{"course_id", "code"?}` → `{list_price, discount, price, free, code, code_ignored, promotion}`; errors `{"code": "invalid_code" \| "not_started" \| "expired" \| "not_applicable" \| "sold_out" \| "already_used" \| "too_many_attempts" \| "not_purchasable"}` |
 | GET | `/api/v1/me/orders/` | logged in | The user's orders |
 | POST | `/api/v1/agreements/redeem/` | logged in | `{"code", "course_id"}` → `{"order_id", "course_id"}`; errors `{"code": "invalid_code" \| "expired" \| "course_not_included" \| "already_enrolled" \| "too_many_attempts" \| "unavailable" \| "enrollment_failed"}` |
 | POST | `/api/v1/webhooks/stripe/` | Stripe signature | Stripe events |
 | GET | `/api/v1/stats/?from=&to=` | contador | Dashboard figures for a period (dates `YYYY-MM-DD`, default last 30 days, up to a year) |
-| GET | `/api/v1/orders/` | contador | Every order, 50 per page; `?status=`, `?access=`, `?course_key=`, `?q=` (username or email) |
+| GET | `/api/v1/orders/` | contador | Every order, 50 per page; `?status=`, `?access=`, `?course_key=`, `?origin=`, `?promotion=` (id), `?q=` (username or email) |
+| GET, POST | `/api/v1/promotions/` | contador | Offers and discount codes, with `state` and `report` (uses, remaining, paid, refunded, revenue, discounts); `?q=`, `?kind=` |
+| GET, PATCH, PUT, DELETE | `/api/v1/promotions/{id}/` | contador | Read / edit (the discount and the kind can't change once used) / delete (only while unused) |
 | POST | `/api/v1/orders/{id}/retry-access/` | contador | Retry the Open edX access of an order now, without waiting for `reconcile_orders` |
 | GET, POST | `/api/v1/products/` | contador | List (`?status=`) / create a product (JSON) |
 | GET, PATCH, PUT, DELETE | `/api/v1/products/{id}/` | contador | Read / edit / delete (only before it exists in Open edX) |
@@ -181,13 +184,39 @@ limited to 10 per user and 30 per IP every 15 minutes; they're deleted after
 `make tutor ARGS="dev exec campus-cms python manage.py purge_redeem_attempts"`).
 Agreement orders don't count in the dashboard money figures.
 
+## Promotions (ofertas y códigos de descuento)
+
+App `promotions`, managed from Campus' admin (`/admin/promociones`, contadores)
+or the Django admin. Prices are computed in the CMS (`promotions/pricing.py`):
+the gateway only receives the final amount (Stripe gets it as `price_data`, no
+Stripe coupons), so adding another gateway doesn't move these rules.
+
+- **Oferta**: applies by itself to anyone (new course, season sale). The
+  catalog sends it as `offer` and the site shows the list price crossed out.
+  Up to 99%: an offer never gives a course away.
+- **Código de descuento**: applies when the buyer types it on the course page
+  (`/cursos/{id}?codigo=X` opens it already applied). Up to 100%: a free
+  course skips Stripe and enrolls right away (`origin = promotion`, amount 0;
+  if Open edX fails, nothing is used).
+- Percent or fixed amount; some courses or all; optional start/end; optional
+  total uses; uses per person (codes; 1 by default).
+- Discounts don't stack: with an offer and a code, the lowest price wins.
+- A paid price never goes below $10 MXN (Stripe's minimum).
+- A use counts when paid, and stays counted after a refund. An open checkout
+  holds a use for 30 minutes (the Stripe session closes then), so a code with
+  few uses left isn't oversold; an OXXO voucher paid later is honored anyway.
+- Orders keep `list_price`, `discount`, `promotion` and `promotion_code`.
+- Wrong codes are limited to 10 per user and 30 per IP every 15 minutes.
+
 ## Dashboard figures
 
 `sales/stats.py`, in MXN and by local day (`TIME_ZONE`, Mexico City):
 
 - **gross** ("Entró"): orders paid in the period, by `paid_at`, including ones refunded later;
 - **refunds**: orders refunded in the period, by `refunded_at`;
-- **net**: gross − refunds (a day with more refunds than sales goes negative).
+- **net**: gross − refunds (a day with more refunds than sales goes negative);
+- **discounts**: what promotions took off the list price of the orders paid in
+  the period (100% codes included, though they aren't sales).
 
 Each response also has the same totals for the same number of days right
 before (`previous`, for the % change), a series per day (per week, starting on

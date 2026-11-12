@@ -115,7 +115,8 @@ class CheckoutTests(SalesTestCase):
     def test_checkout_reuses_open_session(self, retrieve, create):
         order = self.make_order()
         response = self.checkout()
-        assert response.json() == {"order_id": order.pk, "checkout_url": "https://checkout.stripe.test/1"}
+        assert response.json() == {"order_id": order.pk, "checkout_url": "https://checkout.stripe.test/1",
+                                   "enrolled": False}
         create.assert_not_called()
 
     @mock.patch("stripe.checkout.Session.create", return_value=SimpleNamespace(id="cs_test_2", url="https://checkout.stripe.test/2"))

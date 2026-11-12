@@ -97,11 +97,12 @@ class CatalogSerializer(serializers.ModelSerializer):
     price = serializers.SerializerMethodField()
     currency = serializers.SerializerMethodField()
     on_sale = serializers.SerializerMethodField()
+    offer = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = ("id", "title", "org", "number", "short_description", "description", "image",
-                  "price", "currency", "on_sale")
+                  "price", "currency", "on_sale", "offer")
 
     def get_price(self, obj):
         return float(obj.price) if obj.price is not None else None
@@ -111,3 +112,19 @@ class CatalogSerializer(serializers.ModelSerializer):
 
     def get_on_sale(self, obj):
         return obj.status == Product.Status.ON_SALE
+
+    def get_offer(self, obj):
+        """The running offer (promotions app), if any: ``price`` stays the list price."""
+        from promotions.pricing import best_offer  # promotions imports catalog
+
+        if obj.status != Product.Status.ON_SALE:
+            return None
+        offer = best_offer(obj)
+        if offer is None:
+            return None
+        return {
+            "name": offer.promotion.name,
+            "price": float(offer.price),
+            "discount": float(offer.discount),
+            "ends_at": offer.promotion.ends_at,
+        }

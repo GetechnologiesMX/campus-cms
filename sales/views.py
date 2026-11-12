@@ -16,6 +16,7 @@ from rest_framework.generics import ListAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
+from core.http import client_ip
 from core.permissions import IsContador
 
 from . import services
@@ -28,22 +29,27 @@ log = logging.getLogger(__name__)
 @api_view(["POST"])
 def checkout(request):
     """
-    POST /api/v1/checkout/  {"course_id": "course-v1:..."}
+    POST /api/v1/checkout/  {"course_id": "course-v1:...", "code": "BUENFIN25" (optional)}
 
-    Starts a purchase as the logged-in user and returns the Stripe Checkout URL.
-    Access is granted later, by the webhook, once Stripe confirms the payment.
-    Errors: {"code": "course_not_found" | "not_purchasable" | "already_owned", "detail"}.
+    Starts a purchase as the logged-in user, at the price with the running
+    offer or the discount code, and returns the Stripe Checkout URL. Access is
+    granted later, by the webhook, once Stripe confirms the payment.
+    A 100% code enrolls right away: {"order_id", "checkout_url": null, "enrolled": true}.
+    Errors: {"code": "course_not_found" | "not_purchasable" | "already_owned" | "price_changed"
+    | "enrollment_failed" | a discount code error (see promotions.pricing), "detail"}.
     """
     course_id = str(request.data.get("course_id", ""))
+    code = str(request.data.get("code") or "")[:64]
     try:
-        order, checkout_url = services.create_checkout(request.user, course_id)
+        order, checkout_url = services.create_checkout(request.user, course_id, code=code, ip=client_ip(request))
     except services.PurchaseError as exc:
         return Response({"code": exc.code, "detail": str(exc)}, status=exc.status)
     except stripe.StripeError:
         log.exception("Stripe rejected a checkout for %s", course_id)
         return Response({"code": "payment_unavailable", "detail": "No se pudo iniciar el pago. Intenta de nuevo."},
                         status=502)
-    return Response({"order_id": order.pk, "checkout_url": checkout_url}, status=201)
+    return Response({"order_id": order.pk, "checkout_url": checkout_url, "enrolled": checkout_url is None},
+                    status=201)
 
 
 class OrderSerializer(serializers.ModelSerializer):
@@ -139,8 +145,9 @@ class AdminOrderSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Order
-        fields = ("id", "username", "email", "course_key", "course_title", "amount", "currency", "origin", "status",
-                  "access", "access_error", "created", "paid_at", "refunded_at")
+        fields = ("id", "username", "email", "course_key", "course_title", "amount", "list_price", "discount",
+                  "promotion", "promotion_code", "currency", "origin", "status", "access", "access_error", "created",
+                  "paid_at", "refunded_at")
 
 
 class OrderPagination(PageNumberPagination):
@@ -150,7 +157,7 @@ class OrderPagination(PageNumberPagination):
 class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     """
     /api/v1/orders/ — every order, newest first, 50 per page.
-    Filters: ?status=, ?access=, ?course_key=, ?q= (username or email).
+    Filters: ?status=, ?access=, ?course_key=, ?origin=, ?promotion= (id), ?q= (username or email).
     POST /api/v1/orders/{id}/retry-access/ — try again to give (or remove) the
     Open edX access that failed, without waiting for reconcile_orders.
     """
@@ -162,9 +169,11 @@ class OrderViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         queryset = Order.objects.select_related("user", "product")
         params = self.request.query_params
-        for field in ("status", "access", "course_key"):
+        for field in ("status", "access", "course_key", "origin"):
             if params.get(field):
                 queryset = queryset.filter(**{field: params[field]})
+        if params.get("promotion"):
+            queryset = queryset.filter(promotion_id=params["promotion"] if params["promotion"].isdigit() else None)
         if params.get("q"):
             queryset = queryset.filter(Q(user__username__icontains=params["q"]) | Q(user__email__icontains=params["q"]))
         return queryset

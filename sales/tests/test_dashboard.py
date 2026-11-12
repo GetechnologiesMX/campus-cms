@@ -55,7 +55,7 @@ class DashboardTests(TestCase):
         assert data["granularity"] == "day"
         assert data["totals"] == {
             "gross": "3500.00", "refunds": "500.00", "net": "3000.00", "paid_orders": 4, "refunded_orders": 1,
-            "buyers": 3, "average_order": "875.00",
+            "buyers": 3, "average_order": "875.00", "discounts": "0.00",
         }
         assert data["previous"]["gross"] == "1000.00"  # Sep 1-30, same length before: the Sep 28 sale
         series = {point["date"]: point for point in data["series"]}
@@ -91,6 +91,14 @@ class DashboardTests(TestCase):
         data = self.get(**{"from": "2026-10-01", "to": "2026-10-31"}).json()
         assert (data["totals"]["paid_orders"], data["totals"]["average_order"]) == (1, "1000.00")
         assert next(c for c in data["courses"] if c["title"] == "Contabilidad")["sold"] == 1
+
+    def test_discounts_given(self):
+        self.sale(self.a, self.users[0], at(5), amount="800.00", discount="200.00")
+        self.sale(self.a, self.users[1], at(5), amount="0.00", discount="1000.00", origin=Order.Origin.PROMOTION)
+        self.sale(self.a, self.users[2], at(5), amount="0.00", origin=Order.Origin.AGREEMENT)
+        totals = self.get(**{"from": "2026-10-01", "to": "2026-10-31"}).json()["totals"]
+        # A 100% code isn't a sale, but its discount was given.
+        assert (totals["gross"], totals["paid_orders"], totals["discounts"]) == ("800.00", 1, "1200.00")
 
     def test_access_errors_need_attention(self):
         self.sale(self.a, self.users[0], at(5), access=Order.Access.ERROR, access_error="LMS down")

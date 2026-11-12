@@ -5,7 +5,9 @@ Definitions (all in MXN, by local day in settings.TIME_ZONE):
 - gross: money that came in during the period (orders by ``paid_at``), including
   orders refunded later;
 - refunds: money that went back during the period (orders by ``refunded_at``);
-- net: gross - refunds.
+- net: gross - refunds;
+- discounts: what promotions took off the list price of the orders paid in
+  the period (also 100% discount codes, which aren't sales).
 
 Only sales count: enrollments with a company agreement code (origin
 "agreement", amount 0) are billed outside the platform and would only add
@@ -21,7 +23,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 
 from catalog.models import Product
 
@@ -63,6 +65,9 @@ def _totals(since, until):
     refunds = list(_sales().filter(refunded_at__gte=since, refunded_at__lt=until).values_list("amount", flat=True))
     gross = sum((amount for amount, _ in paid), ZERO)
     refunded = sum(refunds, ZERO)
+    discounts = Order.objects.filter(
+        origin__in=[Order.Origin.STRIPE, Order.Origin.PROMOTION], paid_at__gte=since, paid_at__lt=until,
+    ).aggregate(total=Sum("discount"))["total"] or ZERO
     return {
         "gross": gross,
         "refunds": refunded,
@@ -71,6 +76,7 @@ def _totals(since, until):
         "refunded_orders": len(refunds),
         "buyers": len({user for _, user in paid}),
         "average_order": (gross / len(paid)).quantize(Decimal("0.01")) if paid else None,
+        "discounts": discounts,
     }
 
 
